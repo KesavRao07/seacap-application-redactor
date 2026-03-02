@@ -1,0 +1,163 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>SeaCap PDF Redactor (Stable)</title>
+  <style>
+    :root{--muted:#6b7280;--card-border:#e5e7eb;--bg:#111;--ok:#0f766e;--err:#b91c1c}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;margin:24px;max-width:900px}
+    .card{border:1px solid var(--card-border);border-radius:14px;padding:18px}
+    h2{margin:0 0 8px 0}
+    .muted{color:var(--muted);font-size:14px;line-height:1.4}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px}
+    input{font-size:16px}
+    button{padding:10px 14px;border-radius:12px;border:0;background:var(--bg);color:#fff;cursor:pointer}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    progress{width:280px;height:14px}
+    .ok{color:var(--ok)}
+    .err{color:var(--err)}
+  </style>
+</head>
+<body>
+  <div class="card" role="main" aria-labelledby="title">
+    <h2 id="title">Upload → Download Redacted SEACAP APP PDF (Stable)</h2>
+    <p class="muted">
+      Upload the <b>RAW</b> signed PDF → download a redacted copy. <b>Output keeps only page 1.</b><br/>
+      This uses <b>pdf-lib only</b> (no canvas), so redaction boxes won’t shift on Windows/Mac.
+    </p>
+
+    <div id="libStatus" class="muted" aria-live="polite"></div>
+
+    <div class="row">
+      <input id="runFile" type="file" accept="application/pdf" aria-label="Upload PDF"/>
+      <button id="runRedact" disabled>Redact & Download</button>
+      <progress id="prog" value="0" max="1" style="display:none"></progress>
+    </div>
+
+    <p id="runStatus" class="muted" style="margin-top:10px" aria-live="polite"></p>
+  </div>
+
+  <!-- pdf-lib only -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+
+  <script>
+    // ✅ Stable boxes (normalized to page size)
+    // These correspond to your Mac Preview measurements on a 1912.5 x 2475pt page.
+    // Using normalized fractions makes it still land correctly if a PDF has a tiny CropBox/height difference.
+    const REDACTION_BOXES_NORM = [
+      // 1) Left 889.51  Top 1438.30  Width 924.09  Height 105.83
+      { label: "Redact_1", x: 0.465103, y: 0.581131, w: 0.483184, h: 0.042760 },
+
+      // 2) Left 1225.25 Top 808.31   Width 587.97  Height 115.17
+      { label: "Redact_2", x: 0.640654, y: 0.326590, w: 0.307435, h: 0.046533 },
+
+      // 3) Left 106.62  Top 583.12   Width 621.92  Height 110.58
+      { label: "Redact_3", x: 0.055749, y: 0.235604, w: 0.325187, h: 0.044679 }
+    ];
+
+    const libStatus = document.getElementById("libStatus");
+    const runFile = document.getElementById("runFile");
+    const runRedact = document.getElementById("runRedact");
+    const runStatus = document.getElementById("runStatus");
+    const prog = document.getElementById("prog");
+
+    function setStatus(text, kind) {
+      runStatus.textContent = text || "";
+      runStatus.className = kind === "ok" ? "ok" : kind === "err" ? "err" : "muted";
+    }
+
+    (function boot() {
+      if (typeof window.PDFLib === "undefined") {
+        libStatus.innerHTML = '<span class="err">pdf-lib failed to load. Refresh.</span>';
+        return;
+      }
+      libStatus.innerHTML = '<span class="ok">Ready ✅</span>';
+
+      runFile.addEventListener("change", () => {
+        runRedact.disabled = !runFile.files?.[0];
+        setStatus("");
+        prog.style.display = "none";
+      });
+
+      runRedact.addEventListener("click", redactAndDownload);
+    })();
+
+    async function redactAndDownload() {
+      const f = runFile.files?.[0];
+      if (!f) return;
+
+      runRedact.disabled = true;
+      prog.style.display = "inline-block";
+      prog.value = 0;
+      prog.max = 1;
+
+      try {
+        setStatus("Loading PDF…");
+        const bytes = new Uint8Array(await f.arrayBuffer());
+
+        // Load original PDF (ignoreEncryption helps with some signed PDFs)
+        const srcPdf = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
+        const pageCount = srcPdf.getPageCount();
+        if (pageCount < 1) throw new Error("PDF has no pages");
+
+        // Create output PDF with ONLY page 1 copied (this keeps all real content)
+        const outPdf = await PDFLib.PDFDocument.create();
+        const [page1] = await outPdf.copyPages(srcPdf, [0]);
+        outPdf.addPage(page1);
+
+        const page = outPdf.getPage(0);
+        const pageW = page.getWidth();
+        const pageH = page.getHeight();
+
+        setStatus("Applying redaction (page 1)…");
+
+        // Draw black rectangles (PDF origin is bottom-left)
+        for (const b of REDACTION_BOXES_NORM) {
+          const x = b.x * pageW;
+          const yFromTop = b.y * pageH;          // measured from TOP as fraction
+          const h = b.h * pageH;
+          const y = pageH - yFromTop - h;        // convert top-origin → bottom-origin
+
+          page.drawRectangle({
+            x,
+            y,
+            width: b.w * pageW,
+            height: h,
+            color: PDFLib.rgb(0, 0, 0),
+            opacity: 1,
+            borderWidth: 0
+          });
+        }
+
+        prog.value = 0.85;
+        setStatus("Saving redacted PDF…");
+
+        const outBytes = await outPdf.save();
+
+        // Download
+        const blob = new Blob([outBytes], { type: "application/pdf" });
+        const url = URL.createObjectURL(blob);
+
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = (f.name.replace(/\.pdf$/i, "") || "REDACTED") + " - REDACTED (PAGE 1 ONLY).pdf";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+
+        prog.value = 1;
+        setStatus("Done. Download started.", "ok");
+      } catch (err) {
+        console.error(err);
+        setStatus("Failed: " + (err?.message || "Unknown error"), "err");
+      } finally {
+        prog.style.display = "none";
+        runRedact.disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>
