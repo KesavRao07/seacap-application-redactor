@@ -98,7 +98,7 @@
         const { PDFDocument, rgb } = PDFLib;
 
         // Load original
-        const srcPdf = await PDFDocument.load(bytes);
+        const srcPdf = await PDFDocument.load(bytes, { ignoreEncryption: true });
 
         if (srcPdf.getPageCount() < 1) throw new Error("PDF has no pages");
 
