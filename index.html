@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>SeaCap PDF Redactor (pdf-lib only)</title>
+  <title>SeaCap PDF Redactor</title>
   <style>
     :root{--muted:#6b7280;--card-border:#e5e7eb;--bg:#111;--ok:#0f766e;--err:#b91c1c}
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;margin:24px;max-width:900px}
@@ -23,13 +23,13 @@
   <div class="card" role="main" aria-labelledby="title">
     <h2 id="title">Upload → Download Redacted SEACAP APP PDF</h2>
     <p class="muted">
-      Upload a signed SEACAP PDF and download a redacted copy.
-      <b>Only page 1 is kept</b>. Boxes are placed using <b>PDF points</b> (stable on Mac/Windows).
+      Upload a signed SEACAP PDF and download a redacted copy. <b>Only page 1 is kept</b>.
+      Redaction is done in <b>PDF points</b> (stable on Windows + Mac).
     </p>
 
     <div id="libStatus" class="muted" aria-live="polite"></div>
 
-    <div class="row">
+    <div class="row" style="margin-top:12px">
       <input id="runFile" type="file" accept="application/pdf" aria-label="Upload PDF"/>
       <button id="runRedact" disabled>Redact & Download</button>
       <progress id="prog" value="0" max="1" style="display:none"></progress>
@@ -42,16 +42,13 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
 
   <script>
-    // ====== Boxes from Mac Preview "Selection" (Units: Points) ======
-    // Media Box: 1912.5 × 2475 (points)
-    // Using TOP-origin coordinates from Preview:
-    // 1) Left 889.51  Top 1438.30  Width 924.09  Height 105.83
-    // 2) Left 1225.25 Top 808.31   Width 587.97  Height 115.17
-    // 3) Left 106.62  Top 583.12   Width 621.92  Height 110.58
-    const BOXES_TOP_ORIGIN_POINTS = [
-      { label: "Redact_1", left: 889.51,  top: 1438.30, width: 924.09, height: 105.83 },
-      { label: "Redact_2", left: 1225.25, top: 808.31,  width: 587.97, height: 115.17 },
-      { label: "Redact_3", left: 106.62,  top: 583.12,  width: 621.92, height: 110.58 }
+    // ======== Redaction boxes from macOS Preview (Units: Points) ========
+    // These are Top-origin measurements (Preview measures "Top" from top of page).
+    // We'll convert to PDF bottom-origin using: y = pageHeight - top - height
+    const BOXES_TOP_ORIGIN = [
+      { label: "Redact_1", left:  889.51, top: 1438.30, width: 924.09, height: 105.83 },
+      { label: "Redact_2", left: 1225.25, top:  808.31, width: 587.97, height: 115.17 },
+      { label: "Redact_3", left:  106.62, top:  583.12, width: 621.92, height: 110.58 }
     ];
 
     const libStatus = document.getElementById("libStatus");
@@ -65,8 +62,12 @@
       runStatus.className = kind === "ok" ? "ok" : kind === "err" ? "err" : "muted";
     }
 
+    function libsReady() {
+      return typeof window.PDFLib !== "undefined";
+    }
+
     (function boot() {
-      if (typeof window.PDFLib === "undefined") {
+      if (!libsReady()) {
         libStatus.innerHTML = '<span class="err">pdf-lib failed to load. Refresh the page.</span>';
         return;
       }
@@ -92,46 +93,45 @@
 
       try {
         setStatus("Loading PDF…");
-        const bytes = new Uint8Array(await f.arrayBuffer());
+        const bytes = await f.arrayBuffer();
 
-        // Load the actual uploaded PDF (this preserves all original content)
-        const pdfDoc = await PDFLib.PDFDocument.load(bytes);
+        const { PDFDocument, rgb } = PDFLib;
 
-        const pages = pdfDoc.getPages();
-        if (!pages.length) throw new Error("PDF has no pages");
+        // Load original
+        const srcPdf = await PDFDocument.load(bytes);
 
-        // Keep only page 1
-        // Remove from the end to avoid index shifting
-        for (let i = pages.length - 1; i >= 1; i--) {
-          pdfDoc.removePage(i);
-        }
+        if (srcPdf.getPageCount() < 1) throw new Error("PDF has no pages");
 
-        const page = pdfDoc.getPage(0);
+        // Create output doc with ONLY page 1 copied in (this avoids “white blank page” issue)
+        const outPdf = await PDFDocument.create();
+        const [copiedPage] = await outPdf.copyPages(srcPdf, [0]);
+        outPdf.addPage(copiedPage);
+
+        // Get size in PDF points
+        const page = outPdf.getPage(0);
         const { width: pageW, height: pageH } = page.getSize();
 
-        setStatus("Applying redaction overlays…");
+        setStatus("Applying redaction…");
 
-        // Convert TOP-origin (Preview) → PDF-lib coordinates (bottom-left origin)
-        // y_pdf = pageH - top - height
-        for (const b of BOXES_TOP_ORIGIN_POINTS) {
+        // Draw black boxes in PDF coordinates (bottom-left origin)
+        for (const b of BOXES_TOP_ORIGIN) {
           const x = b.left;
-          const y = pageH - b.top - b.height;
+          const y = pageH - b.top - b.height; // convert Top-origin -> PDF bottom-origin
 
           page.drawRectangle({
             x,
             y,
             width: b.width,
             height: b.height,
-            color: PDFLib.rgb(0, 0, 0),
-            borderColor: PDFLib.rgb(0, 0, 0),
+            color: rgb(0, 0, 0),
             borderWidth: 0
           });
         }
 
         prog.value = 0.8;
-        setStatus("Saving…");
+        setStatus("Saving redacted PDF (page 1 only)…");
 
-        const outBytes = await pdfDoc.save();
+        const outBytes = await outPdf.save();
 
         const blob = new Blob([outBytes], { type: "application/pdf" });
         const url = URL.createObjectURL(blob);
