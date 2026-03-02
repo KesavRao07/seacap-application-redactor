@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>SeaCap PDF Redactor</title>
+  <title>SeaCap PDF Redactor (Stable Raster)</title>
   <style>
     :root{--muted:#6b7280;--card-border:#e5e7eb;--bg:#111;--ok:#0f766e;--err:#b91c1c}
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;margin:24px;max-width:900px}
@@ -20,116 +20,119 @@
   </style>
 </head>
 <body>
-  <div class="card" role="main" aria-labelledby="title">
-    <h2 id="title">Upload → Download Redacted SEACAP APP PDF</h2>
+  <div class="card">
+    <h2>Upload → Download Redacted SEACAP PDF</h2>
     <p class="muted">
-      Upload a signed SEACAP PDF and download a redacted copy. <b>Only page 1 is kept</b>.
-      Redaction is done in <b>PDF points</b> (stable on Windows + Mac).
+      Rasterized redaction. Only page 1 is kept. Stable across Windows + Mac.
     </p>
 
-    <div id="libStatus" class="muted" aria-live="polite"></div>
-
-    <div class="row" style="margin-top:12px">
-      <input id="runFile" type="file" accept="application/pdf" aria-label="Upload PDF"/>
-      <button id="runRedact" disabled>Redact & Download</button>
+    <div class="row">
+      <input id="file" type="file" accept="application/pdf"/>
+      <button id="run" disabled>Redact & Download</button>
       <progress id="prog" value="0" max="1" style="display:none"></progress>
     </div>
 
-    <p id="runStatus" class="muted" style="margin-top:10px" aria-live="polite"></p>
+    <p id="status" class="muted"></p>
   </div>
 
-  <!-- pdf-lib only -->
+  <!-- pdf.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.7.570/pdf.min.js"></script>
+  <!-- pdf-lib -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
 
   <script>
-    // ======== Redaction boxes from macOS Preview (Units: Points) ========
-    // These are Top-origin measurements (Preview measures "Top" from top of page).
-    // We'll convert to PDF bottom-origin using: y = pageHeight - top - height
-    const BOXES_TOP_ORIGIN = [
-      { label: "Redact_1", left:  889.51, top: 1438.30, width: 924.09, height: 105.83 },
-      { label: "Redact_2", left: 1225.25, top:  808.31, width: 587.97, height: 115.17 },
-      { label: "Redact_3", left:  106.62, top:  583.12, width: 621.92, height: 110.58 }
-    ];
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.7.570/pdf.worker.min.js";
 
-    const libStatus = document.getElementById("libStatus");
-    const runFile = document.getElementById("runFile");
-    const runRedact = document.getElementById("runRedact");
-    const runStatus = document.getElementById("runStatus");
+    const fileInput = document.getElementById("file");
+    const runBtn = document.getElementById("run");
+    const status = document.getElementById("status");
     const prog = document.getElementById("prog");
 
-    function setStatus(text, kind) {
-      runStatus.textContent = text || "";
-      runStatus.className = kind === "ok" ? "ok" : kind === "err" ? "err" : "muted";
-    }
+    fileInput.addEventListener("change", () => {
+      runBtn.disabled = !fileInput.files?.[0];
+    });
 
-    function libsReady() {
-      return typeof window.PDFLib !== "undefined";
-    }
+    runBtn.addEventListener("click", processPDF);
 
-    (function boot() {
-      if (!libsReady()) {
-        libStatus.innerHTML = '<span class="err">pdf-lib failed to load. Refresh the page.</span>';
-        return;
-      }
-      libStatus.innerHTML = '<span class="ok">Ready ✅</span>';
+    async function processPDF() {
+      const file = fileInput.files?.[0];
+      if (!file) return;
 
-      runFile.addEventListener("change", () => {
-        runRedact.disabled = !runFile.files?.[0];
-        setStatus("");
-        prog.style.display = "none";
-      });
-
-      runRedact.addEventListener("click", redactAndDownload);
-    })();
-
-    async function redactAndDownload() {
-      const f = runFile.files?.[0];
-      if (!f) return;
-
-      runRedact.disabled = true;
+      runBtn.disabled = true;
       prog.style.display = "inline-block";
       prog.value = 0;
-      prog.max = 1;
+      status.textContent = "Rendering page 1...";
 
       try {
-        setStatus("Loading PDF…");
-        const bytes = await f.arrayBuffer();
+        const bytes = new Uint8Array(await file.arrayBuffer());
 
-        const { PDFDocument, rgb } = PDFLib;
+        // Load PDF (ignore encryption so it never fails)
+        const pdf = await pdfjsLib.getDocument({
+          data: bytes,
+          password: "",
+          ignoreEncryption: true
+        }).promise;
 
-        // Load original
-        const srcPdf = await PDFDocument.load(bytes, { ignoreEncryption: true });
+        const page = await pdf.getPage(1);
 
-        if (srcPdf.getPageCount() < 1) throw new Error("PDF has no pages");
+        const SCALE = 2.0; // consistent scale
+        const viewport = page.getViewport({ scale: SCALE });
 
-        // Create output doc with ONLY page 1 copied in (this avoids “white blank page” issue)
-        const outPdf = await PDFDocument.create();
-        const [copiedPage] = await outPdf.copyPages(srcPdf, [0]);
-        outPdf.addPage(copiedPage);
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
 
-        // Get size in PDF points
-        const page = outPdf.getPage(0);
-        const { width: pageW, height: pageH } = page.getSize();
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
 
-        setStatus("Applying redaction…");
+        await page.render({
+          canvasContext: ctx,
+          viewport
+        }).promise;
 
-        // Draw black boxes in PDF coordinates (bottom-left origin)
-        for (const b of BOXES_TOP_ORIGIN) {
-          const x = b.left;
-          const y = pageH - b.top - b.height; // convert Top-origin -> PDF bottom-origin
+        status.textContent = "Applying redactions...";
 
-          page.drawRectangle({
-            x,
-            y,
-            width: b.width,
-            height: b.height,
-            color: rgb(0, 0, 0),
-            borderWidth: 0
-          });
-        }
+        // ==== YOUR REDACTION BOXES (normalized from Preview) ====
+        const boxes = [
+          { x: 0.465103, y: 0.581131, w: 0.483184, h: 0.042760 },
+          { x: 0.640654, y: 0.326590, w: 0.307435, h: 0.046533 },
+          { x: 0.055749, y: 0.235604, w: 0.325187, h: 0.044679 }
+        ];
 
-        prog.value = 0.8;
-        setStatus("Saving redacted PDF (page 1 only)…");
+        ctx.fillStyle = "#000";
+
+        boxes.forEach(b => {
+          ctx.fillRect(
+            b.x * canvas.width,
+            b.y * canvas.height,
+            b.w * canvas.width,
+            b.h * canvas.height
+          );
+        });
+
+        prog.value = 0.7;
+        status.textContent = "Building final PDF...";
+
+        const outPdf = await PDFLib.PDFDocument.create();
+
+        const pngBlob = await new Promise(resolve =>
+          canvas.toBlob(resolve, "image/png")
+        );
+
+        const pngBytes = await pngBlob.arrayBuffer();
+        const pngImage = await outPdf.embedPng(pngBytes);
+
+        const pageOut = outPdf.addPage([
+          canvas.width,
+          canvas.height
+        ]);
+
+        pageOut.drawImage(pngImage, {
+          x: 0,
+          y: 0,
+          width: canvas.width,
+          height: canvas.height
+        });
 
         const outBytes = await outPdf.save();
 
@@ -138,7 +141,7 @@
 
         const a = document.createElement("a");
         a.href = url;
-        a.download = (f.name.replace(/\.pdf$/i, "") || "REDACTED") + " - REDACTED (PAGE 1 ONLY).pdf";
+        a.download = file.name.replace(/\.pdf$/i,"") + " - REDACTED (PAGE 1 ONLY).pdf";
         document.body.appendChild(a);
         a.click();
         a.remove();
@@ -146,14 +149,14 @@
         setTimeout(() => URL.revokeObjectURL(url), 2000);
 
         prog.value = 1;
-        setStatus("Done. Download started.", "ok");
+        status.textContent = "Done.";
       } catch (err) {
         console.error(err);
-        setStatus("Failed: " + (err?.message || "Unknown error"), "err");
-      } finally {
-        prog.style.display = "none";
-        runRedact.disabled = false;
+        status.textContent = "Error: " + err.message;
       }
+
+      prog.style.display = "none";
+      runBtn.disabled = false;
     }
   </script>
 </body>
